@@ -1,0 +1,245 @@
+you may want to not use stdlib because you develop for embedded systems.
+
+(no rtti, no exceptions are requirements)
+thus you don't use the stdlib.
+
+strings
+=======
+
+std::string in 98
+
+class string
+{
+
+  char* data;      // the string
+  size_t size;     //Length
+  size_t capacity; //LEN
+
+
+}
+
+
+------------------------------
+
+what is copy constructor?
+
+copy constructors instantiate new instances by copying existing ones:
+
+
+class example
+{
+ public:
+    example();      // default constructor
+    example(const example&) //copy constructor
+    {
+        // this is the copy constructor
+    }
+}
+
+
+how to call
+
+int main(void)
+{
+    example x1; //normal ctor
+    example x2 = x1; // copy ctor, creating new object from an existing obj
+    example x3(x2); // copy ctor, same
+
+    foo(x1); // calls the copy ctor to copy the argument for foo
+
+}
+
+also when passing class object by value, or when returning object by value.
+
+
+then there'll be constructors
+
+public:
+   string(const string& s) //copy constructor
+      : data(s.clone()) // new + memmove (may be malloc, memcpy)
+      {}
+    // ... //takes array of char
+    string(const char* s); //new + memmove
+
+both constructors will allocate dynamic memory and move symbols there
+
+
+--------
+
+std::map<string, int> m;
+
+m.insert(
+   std::pair<string, int> ("Hello!", 1)
+   );
+
+   this works slowly because
+   * first constructor of string is called (new, memmove)
+   * then the constructor of the pair, which will initiate copy constructor of string (new, memmove again)
+   * then the string will be copied to the pair. (new, memmove)
+   * then the temporary object for pair and string will be freed.
+   // (new + memmove) * 2 + delete
+   // new + memmove + delete
+
+
+COW
+
+  waste of time happens mostly because of temporary objects.
+  it may be that several pointers point to one object of string.
+  then it should have reference count.
+
+
+  class string_impl
+  {
+    char* data;
+    size_t size;
+    size_t capacity;
+    size_t use_count;
+  }
+
+
+  copy constructor
+
+  class string
+  {
+    string_impl* impl;
+  public:
+    string(const string& s)
+      : impl(s.impl)
+      {
+        ++ impl->use_count;
+      }
+
+   };
+
+
+   when you have a function, which modifies the string, then
+   you check if you are the only one who owns the string
+   if yes, you modify it
+   otherwise you copy it and then only modify.
+
+
+   class string
+   {
+      string_impl* impl;
+      public:
+      char& operator[](size_t)
+      {
+        if (impl->use_count > 1)
+           *this = clone();
+      }
+      return impl->data[i];
+
+   }
+
+
+   destructor decreases reference count
+   if you are the only owner of the dynamic memory it may be freed.
+
+   class string
+   {
+      string_impl* impl;
+    public:
+      ~string()
+        {
+         -- impl->use_count;
+         if (!impl->use_count
+         {
+            delete impl;
+         }
+        }
+
+   }
+
+
+   now again, what if we do m.insert
+
+   std::map<string, int> m;
+
+   m.insert(
+      std::pair<string, int>("Hello, 1)
+       );
+
+   * constructor from the character array - same shit (new, memmove)
+   * then copy constructor will be called when creating a pair.
+   it has no new or memmove.
+   * when pair will be inserted into the map, then again copy constructor of the string is called, which does not call new or memmove.
+   therefore no destructor of temporary object will call delete.
+
+   COW is more than twice as fast as c++98 string.
+
+  Qt uses COW almost in every base class.
+  Pascal uses COW.
+
+  ---------
+
+  then
+
+  * hyper-threading in pentium 4 arrives
+  * two core amd64  arrives
+  * then two core x86_64 arrives
+
+ now our reference counter has problems
+ because it is shared
+ in case we have two objects on different cores
+
+ assume two string objects will try to decrease reference count simultaneously.
+ whether we get a memory leak or a program crash.
+
+ now, how to fix this.
+
+COW MT fix
+
+class string_impl
+{
+
+  char* data;
+  size_t size;
+  size_t capacity;
+  atomic<size_t> use_count; // the fix
+}
+
+
+back then there was no atomic.h which implements atomic operations.
+
+
+now constructor also has atomic structure
+
+class string
+{
+  string_impl* impl;
+public:
+  string(const string& s) //constructor
+    : impl(s.impl)
+    {
+       ++ impl-> use_count; //atomic
+    }
+  char& operator[](size_t i)
+  {
+    if impl->use_count > 1) //atomic
+    {
+       string cloned = clone(); //new + memmove + atomic
+       swap (*this, cloned);
+       //atomic in  ~string for cloned; delete in ~string if other thread released the string 
+    }
+
+  }
+}
+
+
+MT troubles:
+ imagine one thread copies the string.
+ other thread decides to delete the string, while other still copying it.
+
+
+ why atomic operations are slowly
+
+ on x86 non atomic INC - 1 tick.
+
+ atomic INC ~5-20+ ticks, if the core 'owns' the atomic.
+ if other core 'owns' then around 40 ticks.
+
+ https://blog.erratasec.com/2013/02/multi-core-scaling-its-not-multi.html
+ http://www.agner.org/optimize/instruction_tables.pdf
+ https://htor.inf.ethz.ch/publications/img/atomic-bench.pdf
+
+
